@@ -64,4 +64,8 @@ contract BettingPoolFactory is Ownable {
         require(_treasury != address(0), "Invalid treasury");
         treasury = _treasury;
     }
+
+    function withdrawFromPool(address pool) external onlyOwner {
+        EventPool(pool).withdrawRemaining();
+    }
 }
