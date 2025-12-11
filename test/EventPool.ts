@@ -268,7 +268,7 @@ describe("EventPool", () => {
     const { pool, alice } = await networkHelpers.loadFixture(deployFixture);
 
     await viem.assertions.revertWith(
-      pool.write.withdrawRemaining({ account: alice.account }),
+      pool.write.withdrawRemaining([], { account: alice.account }),
       "Unauthorized",
     );
   });

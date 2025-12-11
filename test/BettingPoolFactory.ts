@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import hre from "hardhat";
-import { decodeEventLog, getAddress, zeroAddress } from "viem";
+import { decodeEventLog, getAddress, zeroAddress, keccak256, encodePacked } from "viem";
 
 const { viem, networkHelpers } = await hre.network.connect();
 
@@ -51,7 +51,7 @@ describe("BettingPoolFactory", () => {
     return { publicClient, owner, alice, bob, usdc, treasury, factory };
   }
 
-  it("constructor sets usdc and treasury, and deploys tickets", async () => {
+  it("constructor: sets usdc and treasury, and deploys tickets", async () => {
     const { factory, usdc, treasury } = await networkHelpers.loadFixture(deployFixture);
 
     assert.equal(getAddress(await factory.read.usdc()), getAddress(usdc.address));
@@ -61,7 +61,7 @@ describe("BettingPoolFactory", () => {
     assert.notEqual(getAddress(ticketsAddr), getAddress(zeroAddress));
   });
 
-  it("createPool emits PoolCreated and creates EventPool with correct fields", async () => {
+  it("createPool: emits PoolCreated and creates EventPool with correct fields", async () => {
     const { factory, usdc, owner, publicClient } = await networkHelpers.loadFixture(deployFixture);
 
     const description = "Derby";
@@ -70,7 +70,7 @@ describe("BettingPoolFactory", () => {
     const now = await networkHelpers.time.latest();
     const endTime = now + 3600;
 
-    const { result: returnedPoolAddr, request } = await factory.simulate.createPool(
+    const { result: returnedPoolAddr } = await factory.simulate.createPool(
       [description, [...outcomes], endTime],
       { account: owner.account.address },
     );
@@ -83,7 +83,6 @@ describe("BettingPoolFactory", () => {
 
     const poolAddr = await factory.read.allPools([0n]);
     assert.equal(getAddress(poolAddr), getAddress(returnedPoolAddr));
-
 
     const events = await decodeEventsFromReceipt("BettingPoolFactory", receipt as any);
     const poolCreated = events.find((e) => e.eventName === "PoolCreated");
@@ -108,7 +107,7 @@ describe("BettingPoolFactory", () => {
     assert.equal(getAddress(await pool.read.factoryAddress() as `0x${string}`), getAddress(factory.address));
   });
 
-  it("createPool reverts if endTime is in the past", async () => {
+  it("createPool: reverts if endTime is in the past", async () => {
     const { factory, owner } = await networkHelpers.loadFixture(deployFixture);
 
     const now = await networkHelpers.time.latest();
@@ -132,8 +131,83 @@ describe("BettingPoolFactory", () => {
     );
   });
 
-  // TODO правильный settlePool
+  it("settlePool: settles pool, mints tickets to winners, and sends losing USDC to treasury", async () => {
+    const { publicClient, owner, alice, bob, usdc, treasury, factory } =
+      await networkHelpers.loadFixture(deployFixture);
 
+    const now = await networkHelpers.time.latest();
+    const endTime = now + 3600;
+    const description = "Game";
+    const outcomes = ["1", "2", "X"] as const;
+
+    const createHash = await factory.write.createPool(
+      [description, [...outcomes], endTime],
+      { account: owner.account },
+    );
+    await publicClient.waitForTransactionReceipt({ hash: createHash });
+
+    const poolAddr = await factory.read.allPools([0n]);
+    const pool = await viem.getContractAt("EventPool", poolAddr);
+
+    // Fund bettors with USDC from owner
+    await usdc.write.transfer([alice.account.address, 200_000n], { account: owner.account });
+    await usdc.write.transfer([bob.account.address, 300_000n], { account: owner.account });
+
+    // Approve pool to spend USDC
+    await usdc.write.approve([poolAddr, 200_000n], { account: alice.account });
+    await usdc.write.approve([poolAddr, 300_000n], { account: bob.account });
+
+    // Place bets: alice wins (outcome 1), bob loses (outcome 0)
+    await pool.write.placeBet([1, 200_000n], { account: alice.account });
+    await pool.write.placeBet([0, 300_000n], { account: bob.account });
+
+    // Fast-forward to endTime
+    await networkHelpers.time.increaseTo(endTime);
+
+    // Settle through factory
+    const winningOutcome = 1;
+    const settleHash = await factory.write.settlePool([poolAddr, winningOutcome], {
+      account: owner.account,
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: settleHash });
+
+    // Pool status should be SETTLED (=1)
+    const status = await pool.read.status();
+    assert.equal(Number(status), 1);
+
+    // EventPool should emit Settled(winningOutcome, totalWinningBets)
+    const poolEvents = await decodeEventsFromReceipt("EventPool", receipt as any);
+    const settled = poolEvents.find((e) => e.eventName === "Settled");
+    assert.ok(settled, "EventPool.Settled not found");
+
+    const settledArgs = settled!.args as unknown as { winningOutcome: number; ticketsMinted: bigint };
+    assert.equal(settledArgs.winningOutcome, winningOutcome);
+    assert.equal(settledArgs.ticketsMinted, 200_000n);
+
+    // Factory should emit PoolSettled (in your current factory code it emits ticketsMinted=0)
+    const factoryEvents = await decodeEventsFromReceipt("BettingPoolFactory", receipt as any);
+    const poolSettled = factoryEvents.find((e) => e.eventName === "PoolSettled");
+    assert.ok(poolSettled, "BettingPoolFactory.PoolSettled not found");
+
+    // Verify ERC1155 tickets minted to alice
+    const ticketsAddr = await factory.read.tickets();
+    assert.notEqual(getAddress(ticketsAddr), getAddress(zeroAddress));
+    const tickets = await viem.getContractAt("EventTickets", ticketsAddr);
+
+    const tokenId = BigInt(
+      keccak256(encodePacked(["address", "uint8"], [poolAddr, winningOutcome])),
+    );
+
+    const aliceBal = await tickets.read.balanceOf([alice.account.address, tokenId]);
+    assert.equal(aliceBal, 200_000n);
+
+    const bobBal = await tickets.read.balanceOf([bob.account.address, tokenId]);
+    assert.equal(bobBal, 0n);
+
+    // Losing USDC should arrive to treasury (bob's 300_000)
+    const treasuryBal = await usdc.read.balanceOf([treasury]);
+    assert.equal(treasuryBal, 300_000n);
+  });
 
   it("onlyOwner: non-owner cannot settlePool()", async () => {
     const { factory, owner, alice } = await networkHelpers.loadFixture(deployFixture);
@@ -156,14 +230,14 @@ describe("BettingPoolFactory", () => {
     );
   });
 
-  it("setTreasury updates treasury", async () => {
+  it("setTreasury: updates treasury", async () => {
     const { factory, owner, alice } = await networkHelpers.loadFixture(deployFixture);
 
     await factory.write.setTreasury([alice.account.address], { account: owner.account });
     assert.equal(getAddress(await factory.read.treasury()), getAddress(alice.account.address));
   });
 
-  it("setTreasury reverts with Invalid treasury if zero address", async () => {
+  it("setTreasury: reverts with Invalid treasury if zero address", async () => {
     const { factory, owner } = await networkHelpers.loadFixture(deployFixture);
 
     await viem.assertions.revertWith(
