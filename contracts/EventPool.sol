@@ -73,18 +73,20 @@ contract EventPool {
         emit BetPlaced(msg.sender, outcomeIndex, amount);
     }
 
-    function settle(uint8 winningOutcome) external {
+    function settle(uint8 winningOutcome)
+        external
+        returns (address[] memory winners, uint256[] memory amounts, uint256 totalWinningBets)
+    {
         require(msg.sender == address(factory), "Unauthorized");
         require(status == Status.ACTIVE, "Already settled");
         require(block.timestamp >= endTime, "Event ongoing");
 
         status = Status.SETTLED;
 
-        // Calculate winners and amounts
-        address[] memory winners = new address[](bettors.length);
-        uint256[] memory amounts = new uint256[](bettors.length);
+        winners = new address[](bettors.length);
+        amounts = new uint256[](bettors.length);
+
         uint256 winnerCount;
-        uint256 totalWinningBets;
 
         for (uint256 i; i < bettors.length; i++) {
             address bettor = bettors[i];
@@ -100,32 +102,20 @@ contract EventPool {
             }
         }
 
-        // Trim arrays to actual winner count
         assembly {
             mstore(winners, winnerCount)
             mstore(amounts, winnerCount)
         }
 
-        // Mint tickets to winners (1 token = 1 USDC winning bet)
-        if (winnerCount > 0) {
-            factory.tickets().mintWinningTickets(
-                winners,
-                amounts,
-                address(this),
-                winningOutcome
-            );
-        }
-
-        // Send losing bets to treasury
-        uint256 losingBets = address(this).balance +
-            usdc.balanceOf(address(this)) -
-            totalWinningBets;
+        uint256 losingBets = usdc.balanceOf(address(this)) - totalWinningBets;
         if (losingBets > 0) {
             usdc.safeTransfer(factory.treasury(), losingBets);
         }
 
         emit Settled(winningOutcome, totalWinningBets);
+        return (winners, amounts, totalWinningBets);
     }
+
 
     // Allow withdrawing leftover USDC (should be zero after settlement)
     function withdrawRemaining() external {

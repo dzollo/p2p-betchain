@@ -31,7 +31,7 @@ contract BettingPoolFactory is Ownable {
         treasury = _treasury;
 
         // Deploy ERC-1155 tickets contract (this factory owns it)
-        tickets = new EventTickets(_initialOwner);
+        tickets = new EventTickets(address(this));
     }
 
     function createPool(
@@ -55,13 +55,26 @@ contract BettingPoolFactory is Ownable {
         return address(newPool);
     }
 
-    function settlePool(address pool, uint8 winningOutcome) external onlyOwner {
+function settlePool(address pool, uint8 winningOutcome) external onlyOwner {
+    (address[] memory winners, uint256[] memory amounts, uint256 totalWinningBets) =
         EventPool(pool).settle(winningOutcome);
-        emit PoolSettled(pool, winningOutcome, 0);
+
+    uint256 ticketsMinted = 0;
+    if (winners.length > 0) {
+        tickets.mintWinningTickets(winners, amounts, pool, winningOutcome);
+
+        ticketsMinted = totalWinningBets;
     }
+
+    emit PoolSettled(pool, winningOutcome, ticketsMinted);
+}
 
     function setTreasury(address _treasury) external onlyOwner {
         require(_treasury != address(0), "Invalid treasury");
         treasury = _treasury;
+    }
+
+    function withdrawFromPool(address pool) external onlyOwner {
+        EventPool(pool).withdrawRemaining();
     }
 }
